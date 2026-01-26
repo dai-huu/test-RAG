@@ -1,60 +1,53 @@
+import os
 from langchain_ollama import OllamaLLM
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_text_splitters import CharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
+PERSIST_DIR = "chroma_db"
+EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+
+
 def main():
-    # 1. Khởi tạo LLM Ollama (Đảm bảo bạn đã chạy 'ollama pull llama3')
-    print("--- Đang kết nối với Ollama (Model: llama3)... ---")
-    llm = OllamaLLM(model="llama3")
+    # Sử dụng qwen2.5:7b
+    llm = OllamaLLM(model="qwen2.5:7b", temperature=0)
 
-    # 2. Dữ liệu mẫu để máy học
-    print("--- Đang chuẩn bị dữ liệu mẫu... ---")
-    data = """
-    Đồ án này là về hệ thống RAG chạy trên Ollama.
-    Thực hiện đồ án này có là một nhóm có 3 sinh viên năm 4 gồm: Lương Cẩm Đào, Huỳnh Tấn Dương và Hồ Hữu Đại.
-    Giảng viên hướng dẫn là Tiến sĩ Trịnh Tấn Đạt.
-    Thời gian thực hiện đồ án là 7 tuần.
-    Hệ thống sử dụng LangChain để kết nối và ChromaDB để lưu trữ vector.
-    Mục tiêu là tạo ra một Chatbot có thể trả lời dựa trên tài liệu cá nhân.
-    """
+    # 1. Kiểm tra vector DB đã được build chưa
+    if not os.path.exists(PERSIST_DIR):
+        print(f"❌ Không tìm thấy thư mục vector DB '{PERSIST_DIR}'. Hãy chạy build_data.py trước.")
+        return
 
-    # 3. Chia nhỏ văn bản (Chunking)
-    text_splitter = CharacterTextSplitter(chunk_size=150, chunk_overlap=20)
-    texts = text_splitter.split_text(data)
+    # 2. Khởi tạo embeddings và nạp Chroma từ disk
+    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+    vectorstore = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
 
-    # 4. Tạo Embedding Model (Tải model tí hon từ HuggingFace về máy)
-    print("--- Đang khởi tạo Embedding (Lần đầu sẽ tải model khoảng 80MB)... ---")
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    # 3. PROMPT CHO QWEN2.5 (Sử dụng format chuẩn, không dùng special tokens)
+    template = """Bạn là trợ lý ảo thông minh của Trường Đại học Sài Gòn.
+    Hãy sử dụng thông tin từ tài liệu dưới đây để trả lời câu hỏi của sinh viên.
 
-    # 5. Lưu vào Vector Database (Chỉ lưu tạm thời trong bộ nhớ để test)
-    print("--- Đang đưa dữ liệu vào Vector DB... ---")
-    vectorstore = Chroma.from_texts(texts, embeddings)
+    TÀI LIỆU:
+    {context}
 
-    # 6. Tạo quy trình RAG (LCEL - cách mới)
-    template = """
-        Bạn là trợ lý AI chỉ trả lời dựa trên ngữ cảnh được cung cấp.
+    CÂU HỎI: {question}
 
-        QUAN TRỌNG: 
-        - CHỈ sử dụng thông tin từ ngữ cảnh bên dưới để trả lời
-        - KHÔNG sử dụng kiến thức bên ngoài
-        - Nếu ngữ cảnh KHÔNG chứa thông tin cần thiết, hãy trả lời: "Tôi không tìm thấy thông tin này trong tài liệu được cung cấp."
-        - Chỉ trả lời bằng tiếng Việt.
+    YÊU CẦU:
+    - Trả lời bằng tiếng Việt một cách tự nhiên và chính xác.
+    - Chỉ dựa vào thông tin trong TÀI LIỆU để trả lời.
+    - Nếu tài liệu không có thông tin, hãy trả lời: "Xin lỗi, tôi không tìm thấy thông tin này trong Sổ tay sinh viên."
+    - Tuyệt đối không tự bịa đặt thông tin.
 
-        Ngữ cảnh:
-        {context}
+    TRẢ LỜI:"""
 
-        Câu hỏi: {question}
-
-        Trả lời:"""
-    
     prompt = ChatPromptTemplate.from_template(template)
-    retriever = vectorstore.as_retriever()
     
-    # Tạo chain với LCEL
+    # 4. Tăng số lượng context lấy ra với MMR để đa dạng hóa và tìm rộng hơn
+    retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 6}
+    )
+
     qa_chain = (
         {"context": retriever, "question": RunnablePassthrough()}
         | prompt
@@ -62,29 +55,22 @@ def main():
         | StrOutputParser()
     )
 
-    # 7. Vòng lặp hỏi đáp liên tục
-    print("\n" + "="*60)
-    print("🤖 Chatbot RAG đã sẵn sàng!")
-    print("💡 Gõ 'exit', 'quit', hoặc 'thoát' để kết thúc")
-    print("="*60 + "\n")
+    print("\n🤖 Chatbot SGU (Qwen2.5) đã sẵn sàng!")
     
     while True:
-        query = input("🙋 Bạn: ").strip()
-        
-        # Kiểm tra lệnh thoát
-        if query.lower() in ['exit', 'quit', 'thoát', 'thoat']:
-            print("\n👋 Tạm biệt! Hẹn gặp lại.")
-            break
-        
-        # Bỏ qua nếu câu hỏi trống
-        if not query:
-            continue
+        query = input("\n🙋 Bạn: ").strip()
+        if query.lower() in ['exit', 'quit', 'thoát']: break
         
         try:
+            # Lấy thông tin trang để kiểm tra
+            context_docs = retriever.invoke(query)
+            pages = set([str(d.metadata.get('page') + 1) for d in context_docs]) # +1 vì page bắt đầu từ 0
+            print(f"🔍 Đang tìm ở trang: {', '.join(pages)}...")
+
             response = qa_chain.invoke(query)
-            print(f"🤖 AI: {response}\n")
+            print(f"🤖 AI: {response}")
         except Exception as e:
-            print(f"❌ Có lỗi xảy ra: {e}\n")
+            print(f"❌ Lỗi: {e}")
 
 if __name__ == "__main__":
     main()
